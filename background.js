@@ -162,25 +162,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 async function clearCookiesForDomain(domain, storeId) {
   if (!domain) return 0;
-  let cookiesCleared = 0;
+  let cookiesClearedCount = 0;
   try {
     const cookies = await chrome.cookies.getAll({ domain: domain });
     if (cookies.length === 0) {
       console.log(`No cookies to clear for domain: ${domain}`);
       return 0;
     }
-    for (const cookie of cookies) {
-      // Construct the URL required by chrome.cookies.remove
-      // Ensure domain does not start with a dot for URL construction if it was a host cookie.
+
+    const removalPromises = cookies.map(async (cookie) => {
+      // Filter by storeId if provided and if the cookie belongs to that store
+      if (storeId && cookie.storeId !== storeId) {
+        return; // Skip this cookie if it's not in the target storeId
+      }
       const cookieDomain = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
       const url = `http${cookie.secure ? 's' : ''}://${cookieDomain}${cookie.path}`;
-      await chrome.cookies.remove({ url: url, name: cookie.name, storeId: cookie.storeId });
-      cookiesCleared++;
-    }
-    console.log(`Cleared ${cookiesCleared} cookies for domain: ${domain}`);
-    return cookiesCleared;
+      try {
+        await chrome.cookies.remove({ url: url, name: cookie.name, storeId: cookie.storeId });
+        cookiesClearedCount++; // Increment here, but note: this might not be perfectly accurate in Promise.all if some fail
+      } catch (e) {
+        console.warn(`Failed to remove cookie: ${cookie.name} from ${url}`, e);
+      }
+    });
+
+    await Promise.all(removalPromises);
+    // The cookiesClearedCount might not be perfectly accurate if some promises in Promise.all are rejected
+    // A more accurate count would be to count successful promises, but for logging, this is indicative.
+    console.log(`Attempted to clear cookies for domain: ${domain}. Cleared count (approx): ${cookiesClearedCount}`);
+    return cookiesClearedCount; // This count is approximate due to parallel execution
   } catch (error) {
-    console.error(`Error clearing cookies for ${domain}:`, error);
+    console.error(`Error in clearCookiesForDomain for ${domain}:`, error);
     return 0;
   }
 }
@@ -191,42 +202,58 @@ async function handleSwitchActiveProfile(domain, profileId, activeTab, sendRespo
     return;
   }
 
+  console.time("profileSwitchDuration"); // Start timing
+
   try {
-    // 1. Get the target profile first to ensure it exists
     const profiles = await getAllProfiles();
     const domainProfiles = profiles[domain] || [];
     const targetProfile = domainProfiles.find(p => p.id === profileId);
 
     if (!targetProfile || !targetProfile.cookies) {
       sendResponse({ success: false, error: "Profile not found or no cookies in profile." });
+      console.timeEnd("profileSwitchDuration"); // End timing on error
       return;
     }
     
     const tabStoreId = activeTab && activeTab.cookieStoreId ? activeTab.cookieStoreId : null;
     
+    // 1. Clear current cookies for the domain
+    console.time("clearCookiesDuration");
     const currentCookies = await chrome.cookies.getAll({ domain });
-    for (const cookie of currentCookies) {
-        if (tabStoreId && cookie.storeId !== tabStoreId) {
-            continue; 
-        }
-        const cookieDomain = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
-        const url = `http${cookie.secure ? 's' : ''}://${cookieDomain}${cookie.path}`;
-        try {
-            await chrome.cookies.remove({ url: url, name: cookie.name, storeId: cookie.storeId });
-        } catch (e) {
-            console.warn("Failed to remove cookie:", cookie.name, e);
-        }
-    }
-    console.log(`Cleared existing cookies for domain: ${domain} (considering tab context if available)`);
+    const removalPromises = currentCookies.map(async (cookie) => {
+      // If tabStoreId is present, only remove cookies matching that storeId.
+      // If tabStoreId is null, this condition (cookie.storeId !== tabStoreId) will effectively be false (as null !== anything but null),
+      // so it might not behave as intended if tabStoreId is null and we want to clear from all stores.
+      // Let's refine: only skip if tabStoreId is present AND cookie.storeId does not match.
+      if (tabStoreId && cookie.storeId !== tabStoreId) {
+        return; 
+      }
+      const cookieDomain = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
+      const url = `http${cookie.secure ? 's' : ''}://${cookieDomain}${cookie.path}`;
+      try {
+        await chrome.cookies.remove({ url: url, name: cookie.name, storeId: cookie.storeId });
+      } catch (e) {
+        console.warn(`Failed to remove cookie during switch: ${cookie.name} for domain ${domain}`, e);
+      }
+    });
+    await Promise.all(removalPromises);
+    console.timeEnd("clearCookiesDuration");
+    console.log(`Finished attempting to clear existing cookies for domain: ${domain}`);
 
+    // 2. Apply the new cookies from the profile
+    console.time("applyCookiesDuration");
     await applyCookiesForProfile(targetProfile.cookies, tabStoreId);
+    console.timeEnd("applyCookiesDuration");
     console.log(`Successfully applied cookies for profile: ${targetProfile.name}`);
 
-    // 4. Reload the active tab to reflect the new session
+    // 3. Reload the active tab
+    console.time("reloadTabDuration");
     chrome.tabs.query({ active: true, currentWindow: true }, (tabsToReload) => {
       const currentFocusedTab = tabsToReload && tabsToReload.length > 0 ? tabsToReload[0] : null;
       if (currentFocusedTab && currentFocusedTab.id) {
         chrome.tabs.reload(currentFocusedTab.id, { bypassCache: true }, () => {
+          console.timeEnd("reloadTabDuration");
+          console.timeEnd("profileSwitchDuration"); // End total timing
           if (chrome.runtime.lastError) {
             console.warn("Error reloading tab:", chrome.runtime.lastError.message);
             sendResponse({ success: true, reloaded: false, message: `Cookies swapped for ${targetProfile.name}, but tab reload failed: ${chrome.runtime.lastError.message}` });
@@ -236,17 +263,17 @@ async function handleSwitchActiveProfile(domain, profileId, activeTab, sendRespo
           }
         });
       } else {
-        // Fallback if no active tab is found via query (should be rare)
+        console.timeEnd("reloadTabDuration");
+        console.timeEnd("profileSwitchDuration"); // End total timing
         console.warn("Could not find an active tab to reload after profile switch (query failed).");
         sendResponse({ success: true, reloaded: false, message: `Cookies swapped for ${targetProfile.name}, but no active tab found to reload.` });
       }
     });
 
   } catch (error) {
+    console.timeEnd("profileSwitchDuration"); // End timing on error
     console.error("Error switching profile:", error);
     sendResponse({ success: false, error: error.message });
-    // Attempt to reload if an error occurred mid-way, as state might be inconsistent.
-    // Query for the tab to reload here as well for consistency
     chrome.tabs.query({ active: true, currentWindow: true }, (tabsToReloadOnError) => {
         const tabOnError = tabsToReloadOnError && tabsToReloadOnError.length > 0 ? tabsToReloadOnError[0] : null;
         if (tabOnError && tabOnError.id) {
@@ -300,36 +327,51 @@ async function captureCookiesForDomain(domain) {
 
 // Example of how to set cookies (will be used in Step 4)
 async function applyCookiesForProfile(cookies, targetStoreId) {
-    if (!cookies || cookies.length === 0) return;
+  if (!cookies || cookies.length === 0) return;
 
-    for (const cookie of cookies) {
-        const cookieDetails = {
-            url: cookie.url, 
-            name: cookie.name,
-            value: cookie.value,
-            domain: cookie.domain,
-            path: cookie.path,
-            secure: cookie.secure,
-            httpOnly: cookie.httpOnly,
-            // Use the storeId from the original cookie, but override if a specific targetStoreId is given (e.g., from the active tab)
-            // This is important for container tabs or specific contexts.
-            storeId: targetStoreId || cookie.storeId 
-        };
-        
-        if (cookie.expirationDate) {
-            cookieDetails.expirationDate = cookie.expirationDate;
-        }
+  const setPromises = cookies.map(async (cookie) => {
+    const cookieDetails = {
+      url: cookie.url,
+      name: cookie.name,
+      value: cookie.value,
+      domain: cookie.domain,
+      path: cookie.path,
+      secure: cookie.secure,
+      httpOnly: cookie.httpOnly,
+      storeId: targetStoreId || cookie.storeId // Prioritize targetStoreId if provided
+    };
 
-        try {
-            // Check if domain starts with a dot, and if so, remove it for the set call if it causes issues.
-            // Generally, chrome.cookies.set handles this, but being explicit can avoid problems.
-            // if (cookieDetails.domain && cookieDetails.domain.startsWith('.')) {
-            //   cookieDetails.domain = cookieDetails.domain.substring(1);
-            // }
-            await chrome.cookies.set(cookieDetails);
-        } catch (error) {
-            console.error("Error setting cookie:", cookie.name, cookieDetails, error);
+    if (cookie.expirationDate) {
+      // Ensure expirationDate is in seconds if it's a timestamp
+      // chrome.cookies.set expects it in seconds since epoch if it's a number
+      if (typeof cookie.expirationDate === 'string') {
+        // If it's an ISO string or similar, convert to timestamp in seconds
+        // This part might need adjustment based on how expirationDate is stored
+        // For now, assuming it's already in the correct format or a number in seconds
+        const parsedDate = Date.parse(cookie.expirationDate);
+        if (!isNaN(parsedDate)) {
+            cookieDetails.expirationDate = parsedDate / 1000;
+        } else {
+            // if parsing fails, and it was a number, use it directly (assuming it's seconds)
+            if (typeof cookie.expirationDate === 'number') {
+                 cookieDetails.expirationDate = cookie.expirationDate;
+            } else {
+                console.warn("Could not parse expirationDate:", cookie.expirationDate);
+                delete cookieDetails.expirationDate; // Remove if invalid to avoid errors
+            }
         }
+      } else if (typeof cookie.expirationDate === 'number') {
+        cookieDetails.expirationDate = cookie.expirationDate; // Assume it's already in seconds
+      }
     }
-    console.log(`Attempted to apply ${cookies.length} cookies.`);
+
+    try {
+      await chrome.cookies.set(cookieDetails);
+    } catch (error) {
+      console.error("Error setting cookie:", cookie.name, cookieDetails, error.message);
+    }
+  });
+
+  await Promise.all(setPromises);
+  console.log(`Attempted to apply ${cookies.length} cookies in parallel.`);
 }

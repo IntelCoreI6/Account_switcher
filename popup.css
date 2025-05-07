@@ -41,6 +41,18 @@ h2 {
   border-bottom: 1px solid #f0f0f0;
 }
 
+#profiles-list li .profile-name {
+  flex-grow: 1; /* Allow name to take available space */
+  margin-right: 5px; /* Add some space between name and buttons */
+}
+
+#profiles-list li .profile-buttons button {
+  margin-left: 5px;
+  padding: 5px 8px; /* Increased padding */
+  font-size: 12px;  /* Slightly increased font size */
+  cursor: pointer;
+}
+
 #profiles-list li:last-child {
   border-bottom: none;
 }
