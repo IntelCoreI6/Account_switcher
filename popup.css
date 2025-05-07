@@ -1,0 +1,97 @@
+/* popup.css */
+body {
+  font-family: sans-serif;
+  width: 350px; /* Increased width */
+  padding: 10px;
+}
+
+h1 {
+  font-size: 18px;
+  text-align: center;
+  margin-top: 0;
+  margin-bottom: 5px;
+}
+
+#current-site {
+  font-size: 12px;
+  text-align: center;
+  margin-bottom: 10px;
+  color: #555;
+}
+
+h2 {
+  font-size: 15px;
+  margin-top: 15px;
+  margin-bottom: 5px;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 3px;
+}
+
+#profiles-list ul {
+  list-style-type: none;
+  padding: 0;
+  margin: 0;
+}
+
+#profiles-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 5px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+#profiles-list li:last-child {
+  border-bottom: none;
+}
+
+#profiles-list button {
+  margin-left: 5px;
+  padding: 3px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#capture-session {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-top: 15px;
+  font-size: 14px;
+  background-color: #4CAF50;
+  color: white;
+  border: none;
+  cursor: pointer;
+}
+
+#capture-session:hover {
+  background-color: #45a049;
+}
+
+/* Basic styling for buttons within list items */
+.switch-profile-button {
+  background-color: #007bff;
+  color: white;
+  border: none;
+}
+.switch-profile-button:hover {
+  background-color: #0056b3;
+}
+
+.rename-profile-button {
+  background-color: #ffc107;
+  color: #212529;
+  border: none;
+}
+.rename-profile-button:hover {
+  background-color: #e0a800;
+}
+
+.delete-profile-button {
+  background-color: #dc3545;
+  color: white;
+  border: none;
+}
+.delete-profile-button:hover {
+  background-color: #c82333;
+}
