@@ -199,72 +199,60 @@ async function handleSwitchActiveProfile(domain, profileId, activeTab, sendRespo
 
     if (!targetProfile || !targetProfile.cookies) {
       sendResponse({ success: false, error: "Profile not found or no cookies in profile." });
-      // Optionally, still try to reload the tab if cookies were meant to be cleared for a "logged out" state
-      // For now, we just error out.
       return;
     }
     
-    // 2. Clear current cookies for the domain from the active tab's cookie store
-    // We need the storeId from the active tab to ensure we are clearing/setting cookies in the correct context (e.g., container tabs)
     const tabStoreId = activeTab && activeTab.cookieStoreId ? activeTab.cookieStoreId : null;
-    // Fallback to clearing for the domain generally if no specific storeId, though this is less precise.
-    // For most common cases, chrome.cookies.getAll({domain}) works across stores, but removal/setting needs storeId for precision.
-    // However, chrome.cookies.getAll does not accept storeId. We get all and then filter if needed, or rely on domain matching.
-    // The most robust way is to clear cookies from the specific storeId if available.
     
-    // Get all cookies for the domain first
     const currentCookies = await chrome.cookies.getAll({ domain });
-
-    // Filter them by the tab's cookie store ID if available
     for (const cookie of currentCookies) {
         if (tabStoreId && cookie.storeId !== tabStoreId) {
-            // If we have a specific tabStoreId, only remove cookies from that store.
-            // This prevents clearing cookies from other container contexts if not intended.
-            // However, if the goal is to switch the session for *this* domain regardless of container,
-            // then clearing without storeId (or iterating all stores) might be desired.
-            // For now, let's be conservative: if tabStoreId is known, use it.
-            // This part is tricky: chrome.cookies.remove needs a storeId. If not provided, it uses the current execution context's storeId.
-            // For a background script, this might not be what we want if we are targeting a specific tab's session.
-            // The `sender.tab.cookieStoreId` is the right way to go.
             continue; 
         }
         const cookieDomain = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
         const url = `http${cookie.secure ? 's' : ''}://${cookieDomain}${cookie.path}`;
         try {
-            await chrome.cookies.remove({ url: url, name: cookie.name, storeId: cookie.storeId }); // Use cookie's own storeId for removal
+            await chrome.cookies.remove({ url: url, name: cookie.name, storeId: cookie.storeId });
         } catch (e) {
             console.warn("Failed to remove cookie:", cookie.name, e);
         }
     }
     console.log(`Cleared existing cookies for domain: ${domain} (considering tab context if available)`);
 
-    // 3. Apply the new cookies from the profile
-    // Ensure these cookies are set with the correct storeId if provided by the original cookie data
-    await applyCookiesForProfile(targetProfile.cookies, tabStoreId); // Pass tabStoreId to applyCookies
+    await applyCookiesForProfile(targetProfile.cookies, tabStoreId);
     console.log(`Successfully applied cookies for profile: ${targetProfile.name}`);
 
     // 4. Reload the active tab to reflect the new session
-    if (activeTab && activeTab.id) {
-      chrome.tabs.reload(activeTab.id, { bypassCache: true }, () => {
-        if (chrome.runtime.lastError) {
-          console.warn("Error reloading tab:", chrome.runtime.lastError.message);
-          sendResponse({ success: true, reloaded: false, message: `Cookies swapped for ${targetProfile.name}, but tab reload failed: ${chrome.runtime.lastError.message}` });
-        } else {
-          console.log("Tab reloaded successfully after profile switch.");
-          sendResponse({ success: true, reloaded: true, message: `Switched to profile: ${targetProfile.name}` });
-        }
-      });
-    } else {
-      sendResponse({ success: true, reloaded: false, message: `Cookies swapped for ${targetProfile.name}, but no active tab found to reload.` });
-    }
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabsToReload) => {
+      const currentFocusedTab = tabsToReload && tabsToReload.length > 0 ? tabsToReload[0] : null;
+      if (currentFocusedTab && currentFocusedTab.id) {
+        chrome.tabs.reload(currentFocusedTab.id, { bypassCache: true }, () => {
+          if (chrome.runtime.lastError) {
+            console.warn("Error reloading tab:", chrome.runtime.lastError.message);
+            sendResponse({ success: true, reloaded: false, message: `Cookies swapped for ${targetProfile.name}, but tab reload failed: ${chrome.runtime.lastError.message}` });
+          } else {
+            console.log("Tab reloaded successfully after profile switch.");
+            sendResponse({ success: true, reloaded: true, message: `Switched to profile: ${targetProfile.name}` });
+          }
+        });
+      } else {
+        // Fallback if no active tab is found via query (should be rare)
+        console.warn("Could not find an active tab to reload after profile switch (query failed).");
+        sendResponse({ success: true, reloaded: false, message: `Cookies swapped for ${targetProfile.name}, but no active tab found to reload.` });
+      }
+    });
 
   } catch (error) {
     console.error("Error switching profile:", error);
     sendResponse({ success: false, error: error.message });
     // Attempt to reload if an error occurred mid-way, as state might be inconsistent.
-    if (activeTab && activeTab.id) {
-        chrome.tabs.reload(activeTab.id);
-      }
+    // Query for the tab to reload here as well for consistency
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabsToReloadOnError) => {
+        const tabOnError = tabsToReloadOnError && tabsToReloadOnError.length > 0 ? tabsToReloadOnError[0] : null;
+        if (tabOnError && tabOnError.id) {
+            chrome.tabs.reload(tabOnError.id);
+        }
+    });
   }
 }
 
